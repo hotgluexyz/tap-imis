@@ -1,5 +1,4 @@
 import requests
-from functools import cached_property
 from singer_sdk import typing as th
 
 
