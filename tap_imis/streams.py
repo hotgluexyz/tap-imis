@@ -10,7 +10,7 @@ from tap_imis.client import IMISStream
 class ContactsStream(IMISStream):
     """Define custom stream for Contacts."""
 
-    name = "users"
+    name = "contacts"
     path = "/Party"
 
 class ActivitiesStream(IMISStream):
