@@ -1,6 +1,6 @@
 import requests
 from singer_sdk import typing as th
-from singer_sdk import singer
+import singer
 
 LOGGER = singer.get_logger()
 
