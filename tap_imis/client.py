@@ -1,13 +1,9 @@
-"""REST client handling, including IMIS stream base class."""
+"""REST client handling, including ActionKitStream base class."""
 
-from datetime import datetime
 from functools import cached_property
-import typing as t
 import requests
-from requests.auth import _basic_auth_str
 from singer_sdk.streams import RESTStream
 from singer_sdk import typing as th
-from pendulum import parse
 from tap_imis.auth import IMISAuth
 from tap_imis.schema_inference import SchemaInference
 
