@@ -36,8 +36,84 @@ class SchemaInference:
                 self.logger.warning(f"No records found for {path}. Using empty schema.")
             return {}
 
-        schema = self._analyze_records(records)
-        return schema
+        # Check if we have IMIS GenericPropertyDataCollection structure
+        if records and len(records) > 0 and "Properties" in records[0]:
+            # IMIS specific property structure handling
+            return self._analyze_imis_property_records(records)
+        else:
+            # Standard records analysis
+            return self._analyze_records(records)
+
+    def _analyze_imis_property_records(self, records):
+        """Analyze IMIS specific property-based records structure."""
+        if not records:
+            return {}
+        
+        # Collect all property names and their values across records
+        all_properties = {}
+        
+        for record in records:
+            properties = record.get("Properties", {})
+            
+            # Handle IMIS GenericPropertyDataCollection structure
+            if isinstance(properties, dict) and "$type" in properties and "$values" in properties:
+                if "GenericPropertyDataCollection" in properties.get("$type", ""):
+                    property_values = properties.get("$values", [])
+                    
+                    for prop in property_values:
+                        if not isinstance(prop, dict) or "Name" not in prop:
+                            continue
+                            
+                        name = prop.get("Name")
+                        if name not in all_properties:
+                            all_properties[name] = {"types": set(), "examples": []}
+                        
+                        # Extract the value, which might be a simple value or a complex $value structure
+                        value = None
+                        if "Value" in prop:
+                            raw_value = prop.get("Value")
+                            if isinstance(raw_value, dict) and "$type" in raw_value and "$value" in raw_value:
+                                # Complex IMIS value format
+                                value_type = raw_value.get("$type", "")
+                                value = raw_value.get("$value")
+                                
+                                # Type conversion based on $type
+                                if "System.Int" in value_type:
+                                    try:
+                                        value = int(value)
+                                    except (ValueError, TypeError):
+                                        pass
+                                elif "System.Decimal" in value_type or "System.Double" in value_type:
+                                    try:
+                                        value = float(value)
+                                    except (ValueError, TypeError):
+                                        pass
+                                elif "System.Boolean" in value_type:
+                                    if isinstance(value, str):
+                                        value = value.lower() == "true"
+                                    else:
+                                        value = bool(value)
+                            else:
+                                # Simple value
+                                value = raw_value
+                        
+                        # Track the type and example
+                        if value is not None:
+                            all_properties[name]["types"].add(type(value))
+                            if len(all_properties[name]["examples"]) < 5:
+                                all_properties[name]["examples"].append(value)
+        
+        # Generate schema properties
+        properties = []
+        for key, info in all_properties.items():
+            # Special case for known IMIS ID fields (ensure consistent type)
+            if key in ("Id", "PartyId", "UniformId") or key.endswith("Id"):
+                properties.append(th.Property(key, th.StringType()))
+            else:
+                property_type = self._infer_property_type(key, info)
+                properties.append(th.Property(key, property_type))
+        
+        return th.PropertiesList(*properties).to_dict()
 
     def _analyze_records(self, records):
         """Analyze records to create schema that resembles the metadata schema."""
