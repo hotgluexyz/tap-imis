@@ -13,7 +13,15 @@ class ContactsStream(IMISStream):
     name = "contacts"
     path = "/Party"
 
+    base_property_schema = [
+        th.Property("PartyId", th.StringType()),
+        th.Property("Email", th.StringType()),
+        th.Property("Phone", th.StringType()),
+    ]
+
 class ActivitiesStream(IMISStream):
     """Define custom stream for Activities."""
     name = "activities"
     path = "/Activity"
+
+    base_property_schema = []

@@ -1,16 +1,11 @@
 """REST client handling, including ActionKitStream base class."""
 
-from datetime import datetime
-
 from functools import cached_property
-import typing as t
 import requests
-from requests.auth import _basic_auth_str
 from singer_sdk.streams import RESTStream
 from singer_sdk import typing as th
-from pendulum import parse
 from tap_imis.auth import IMISAuth
-
+from tap_imis.schema_inference import infer_schema_from_records
 class IMISStream(RESTStream):
     """IMIS stream class."""
 
@@ -63,22 +58,54 @@ class IMISStream(RESTStream):
                 obj_props.append(th.Property(generic_property["Name"], self.get_jsonschema_type(generic_property)))
             return th.ObjectType(*obj_props)
         else:
-            return th.CustomType({"type": ["number", "string", "object"]})
+            return th.StringType()
 
  
     def get_schema(self) -> dict:
         url = f"{self.url_base}/metadata{self.path}"
         headers = {"Authorization": f"Bearer {self.get_access_token()}"}
-        response = requests.get(url, headers=headers)
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            schema = response.json().get("Properties").get("$values")
+            properties = []
+            for property in schema:
+                schema_type = self.get_jsonschema_type(property)
+                properties.append(th.Property(property["Name"], schema_type))
+            return th.PropertiesList(*properties).to_dict()
+        except requests.exceptions.HTTPError as e:
+            # Check if we got a 501 Not Implemented error
+            if e.response.status_code == 501:
+                self.logger.warning(f"Metadata endpoint returned 501 for {self.path}. Falling back to record inference.")
+                return self._infer_schema_from_records()
+            # Re-raise if it's a different error
+            raise
+
+    def _infer_schema_from_records(self) -> dict:
+        """Fetch sample records and infer schema from them."""
+        url = f"{self.url_base}{self.path}"
+        headers = {"Authorization": f"Bearer {self.get_access_token()}"}
+        
+        params = {"limit": 500}  
+        response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
-        schema = response.json().get("Properties").get("$values")
-        properties = []
-        for property in schema:
-            schema_type = self.get_jsonschema_type(property)
-            properties.append(th.Property(property["Name"], schema_type))
+        
+        json_response = response.json()
+        items = json_response.get("Items", {})
+        
+        if isinstance(items, dict) and "$values" in items:
+            records = items.get("$values", [])
+        else:
+            records = items if isinstance(items, list) else []
+            
+        if not records:
+            self.logger.warning(f"No records found for {self.path}. Using empty schema.")
+            return {}
+        
+        properties = self.base_property_schema
+        new_properties = infer_schema_from_records(records)
+        properties.extend(new_properties)
         return th.PropertiesList(*properties).to_dict()
-
-
    
     @cached_property
     def schema(self) -> dict:
