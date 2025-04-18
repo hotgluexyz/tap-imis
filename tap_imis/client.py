@@ -5,8 +5,7 @@ import requests
 from singer_sdk.streams import RESTStream
 from singer_sdk import typing as th
 from tap_imis.auth import IMISAuth
-from tap_imis.schema_inference import SchemaInference
-
+from tap_imis.schema_inference import infer_schema_from_records
 class IMISStream(RESTStream):
     """IMIS stream class."""
 
@@ -59,7 +58,7 @@ class IMISStream(RESTStream):
                 obj_props.append(th.Property(generic_property["Name"], self.get_jsonschema_type(generic_property)))
             return th.ObjectType(*obj_props)
         else:
-            return th.CustomType({"type": ["number", "string", "object"]})
+            return th.StringType()
 
  
     def get_schema(self) -> dict:
@@ -84,10 +83,29 @@ class IMISStream(RESTStream):
 
     def _infer_schema_from_records(self) -> dict:
         """Fetch sample records and infer schema from them."""
-        inferrer = SchemaInference(logger=self.logger)
-        api_url = self.url_base
-        auth_token = self.get_access_token()
-        return inferrer.infer_schema_from_records(api_url, auth_token, self.path, self.logger)
+        url = f"{self.url_base}{self.path}"
+        headers = {"Authorization": f"Bearer {self.get_access_token()}"}
+        
+        params = {"limit": 500}  
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        
+        json_response = response.json()
+        items = json_response.get("Items", {})
+        
+        if isinstance(items, dict) and "$values" in items:
+            records = items.get("$values", [])
+        else:
+            records = items if isinstance(items, list) else []
+            
+        if not records:
+            self.logger.warning(f"No records found for {self.path}. Using empty schema.")
+            return {}
+        
+        properties = self.base_property_schema
+        new_properties = infer_schema_from_records(records)
+        properties.extend(new_properties)
+        return th.PropertiesList(*properties).to_dict()
    
     @cached_property
     def schema(self) -> dict:
