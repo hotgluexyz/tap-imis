@@ -77,14 +77,22 @@ def test_discover_stream_schema_uses_metadata_when_samples_fail():
     assert set(discover_stream_schema(stream)["properties"]) == {"EventId", "Capacity"}
 
 
-def test_discover_stream_schema_raises_when_samples_and_metadata_fail():
+@pytest.mark.parametrize(
+    "metadata_response",
+    [RetriableAPIError("503"), {"Properties": {"$values": []}}],
+    ids=["metadata_fails", "metadata_empty"],
+)
+def test_discover_stream_schema_raises_when_samples_fail_without_metadata(metadata_response):
     stream = MagicMock()
     stream.name = "event"
     stream.path = "/Event"
     stream.url_base = "https://example.com/api/"
     stream.logger = MagicMock()
     stream._fetch_sample_records.side_effect = RetriableAPIError("503")
-    stream._request_with_backoff.side_effect = RetriableAPIError("503")
+    if isinstance(metadata_response, Exception):
+        stream._request_with_backoff.side_effect = metadata_response
+    else:
+        stream._request_with_backoff.return_value.json.return_value = metadata_response
 
     with pytest.raises(RuntimeError, match="event"):
         discover_stream_schema(stream)

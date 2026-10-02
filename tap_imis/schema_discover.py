@@ -73,15 +73,15 @@ def discover_stream_schema(stream: IMISStream) -> dict:
        tenant-specific custom Party fields).
     4. A catch-all type for sample fields that were null in every record.
 
-    Raises if both the sample and metadata requests fail. A schema with only the
-    overrides would make sync drop every other field without failing.
+    Raises if the sample request fails and metadata gives no fields either. A schema
+    with only the overrides would make sync drop every other field without failing.
     """
     samples = load_sample_properties(stream)
     metadata = load_metadata_properties(stream)
-    if samples is None and metadata is None:
+    if samples is None and not metadata:
         raise RuntimeError(
             f"Could not build a schema for '{stream.name}': "
-            "both the sample and metadata requests failed."
+            "the sample request failed and metadata returned no fields."
         )
     typed_samples, null_only_samples = samples or ([], [])
     return merge_schema_property_groups(
