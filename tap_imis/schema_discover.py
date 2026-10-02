@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from hotglue_singer_sdk import typing as th
 from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
@@ -29,37 +29,29 @@ def merge_schema_property_groups(*property_groups: List[th.Property]) -> dict:
     return th.PropertiesList(*properties).to_dict()
 
 
-def load_metadata_properties(stream: IMISStream) -> List[th.Property]:
-    """Return properties from ``GET /metadata{path}``, or an empty list if the call fails."""
+def load_metadata_properties(stream: IMISStream) -> Optional[List[th.Property]]:
+    """Return properties from ``GET /metadata{path}``, or None if the call fails."""
     url = f"{stream.url_base.rstrip('/')}/metadata{stream.path}"
     try:
         body = stream._request_with_backoff(url).json()
     except (FatalAPIError, RetriableAPIError) as exc:
-        stream.logger.warning(
-            "Metadata fetch for %s failed: %s; continuing with samples and overrides.",
-            stream.path,
-            exc,
-        )
-        return []
+        stream.logger.warning("Metadata fetch for %s failed: %s", stream.path, exc)
+        return None
     return properties_from_metadata_body(body)
 
 
 def load_sample_properties(
     stream: IMISStream,
-) -> Tuple[List[th.Property], List[th.Property]]:
-    """Infer properties from the first page of normalized records.
+) -> Optional[Tuple[List[th.Property], List[th.Property]]]:
+    """Infer properties from the first page of normalized records, or None if the call fails.
 
     Returns ``(typed, null_only)`` as described in ``infer_schema_from_records``.
     """
     try:
         records = stream._fetch_sample_records()
     except (FatalAPIError, RetriableAPIError) as exc:
-        stream.logger.warning(
-            "Could not fetch samples for %s: %s; continuing with metadata and overrides.",
-            stream.path,
-            exc,
-        )
-        return [], []
+        stream.logger.warning("Sample fetch for %s failed: %s", stream.path, exc)
+        return None
     if not records:
         stream.logger.warning(
             "No records found for %s during schema discovery; continuing with metadata and overrides.",
@@ -80,11 +72,21 @@ def discover_stream_schema(stream: IMISStream) -> dict:
     3. Metadata, which also adds fields missing from the samples (for example
        tenant-specific custom Party fields).
     4. A catch-all type for sample fields that were null in every record.
+
+    Raises if both the sample and metadata requests fail. A schema with only the
+    overrides would make sync drop every other field without failing.
     """
-    typed_samples, null_only_samples = load_sample_properties(stream)
+    samples = load_sample_properties(stream)
+    metadata = load_metadata_properties(stream)
+    if samples is None and metadata is None:
+        raise RuntimeError(
+            f"Could not build a schema for '{stream.name}': "
+            "both the sample and metadata requests failed."
+        )
+    typed_samples, null_only_samples = samples or ([], [])
     return merge_schema_property_groups(
         stream.schema_property_overrides,
         typed_samples,
-        load_metadata_properties(stream),
+        metadata or [],
         null_only_samples,
     )

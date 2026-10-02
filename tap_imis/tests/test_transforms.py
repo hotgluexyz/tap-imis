@@ -23,7 +23,7 @@ def test_normalize_party_promotes_updated_on():
     out = normalize_party(record)
     assert out["PartyId"] == "12345"
     assert out["UpdatedOn"] == "2025-01-15T10:00:00"
-    assert "UpdateInformation" not in out
+    assert out["UpdateInformation"]["CreatedOn"] == "2020-01-01T00:00:00"
     assert "$type" not in out
 
 

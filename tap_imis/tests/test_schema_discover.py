@@ -2,8 +2,9 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from hotglue_singer_sdk import typing as th
-from hotglue_singer_sdk.exceptions import FatalAPIError
+from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 
 from tap_imis.schema_discover import (
     discover_stream_schema,
@@ -52,14 +53,41 @@ def test_discover_stream_schema_merges_all_sources():
     assert set(props) == {"EventId", "FromMetadata", "Location"}
 
 
-def test_load_metadata_properties_returns_empty_on_http_error():
+def test_load_metadata_properties_returns_none_on_http_error():
     stream = MagicMock()
     stream.path = "/Party"
     stream.url_base = "https://example.com/api/"
     stream.logger = MagicMock()
     stream._request_with_backoff.side_effect = FatalAPIError("501")
 
-    assert load_metadata_properties(stream) == []
+    assert load_metadata_properties(stream) is None
+
+
+def test_discover_stream_schema_uses_metadata_when_samples_fail():
+    stream = MagicMock()
+    stream.path = "/Event"
+    stream.url_base = "https://example.com/api/"
+    stream.schema_property_overrides = [th.Property("EventId", th.StringType)]
+    stream.logger = MagicMock()
+    stream._fetch_sample_records.side_effect = RetriableAPIError("503")
+    stream._request_with_backoff.return_value.json.return_value = {
+        "Properties": {"$values": [{"Name": "Capacity", "PropertyTypeName": "Integer"}]}
+    }
+
+    assert set(discover_stream_schema(stream)["properties"]) == {"EventId", "Capacity"}
+
+
+def test_discover_stream_schema_raises_when_samples_and_metadata_fail():
+    stream = MagicMock()
+    stream.name = "event"
+    stream.path = "/Event"
+    stream.url_base = "https://example.com/api/"
+    stream.logger = MagicMock()
+    stream._fetch_sample_records.side_effect = RetriableAPIError("503")
+    stream._request_with_backoff.side_effect = RetriableAPIError("503")
+
+    with pytest.raises(RuntimeError, match="event"):
+        discover_stream_schema(stream)
 
 
 def test_discover_stream_schema_prefers_sample_types_over_metadata():

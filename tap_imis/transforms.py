@@ -55,9 +55,9 @@ def flatten_full_address_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def normalize_party(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Unwrap a Party, promote ``UpdatedOn``, and flatten address items."""
+    """Unwrap a Party, copy ``UpdatedOn`` to the top level, and flatten address items."""
     out = unwrap_imis(record)
-    update_info = out.pop("UpdateInformation", None)
+    update_info = out.get("UpdateInformation")
     if isinstance(update_info, dict) and update_info.get("UpdatedOn") is not None:
         out["UpdatedOn"] = update_info["UpdatedOn"]
 
