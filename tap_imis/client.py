@@ -1,113 +1,145 @@
-"""REST client handling, including ActionKitStream base class."""
+"""REST client handling for iMIS list endpoints."""
 
-from functools import cached_property
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional
+
 import requests
-from singer_sdk.streams import RESTStream
-from singer_sdk import typing as th
-from tap_imis.auth import IMISAuth
-from tap_imis.schema_inference import infer_schema_from_records
+from hotglue_singer_sdk import typing as th
+from hotglue_singer_sdk.streams import RESTStream
+from memoization import cached
+
+from tap_imis.auth import IMISAuthenticator
+from tap_imis.schema_discover import discover_stream_schema
+from tap_imis.transforms import RecordNormalizer, unwrap_imis
+
+
+def imis_next_page_token(page_body: dict) -> Optional[Any]:
+    """Return the next offset token when the list response has another page."""
+    if not page_body.get("HasNext"):
+        return None
+    return page_body.get("NextOffset")
+
+
+def iter_imis_list_records(body: dict) -> Iterable[dict]:
+    """Yield records from an iMIS list response body."""
+    items = body.get("Items", {})
+    if isinstance(items, dict):
+        yield from items.get("$values") or []
+        return
+    if isinstance(items, list):
+        yield from items
+
+
+def imis_replication_filter(replication_key: Optional[str], start_value: Optional[str]) -> dict:
+    """Build the iMIS filter that only returns records at or after ``start_value``."""
+    if not replication_key or not start_value:
+        return {}
+    return {replication_key: f"ge:{start_value}"}
+
+
 class IMISStream(RESTStream):
-    """IMIS stream class."""
+    """Base stream for paginated iMIS list endpoints."""
 
-    access_token = None
-
-    records_jsonpath = "$.Items[*]"
-    
+    # iMIS caps list pages at 500 records and silently ignores larger limits.
+    limit = 500
+    record_normalizer: RecordNormalizer = staticmethod(unwrap_imis)
+    # Fields whose types must not depend on discovery, such as primary and replication keys.
+    schema_property_overrides: List[th.Property] = []
 
     @property
-    def url_base(self):
-        return f"{self.config.get('site_url')}/api/"
+    def url_base(self) -> str:
+        """Return the REST API base URL for this iMIS site."""
+        site_url = self.config.get("site_url", "").rstrip("/")
+        return f"{site_url}/api/"
 
-    def get_new_access_token(self):
-        auth = IMISAuth(self.config)
-        return auth.get_token()
+    @property
+    @cached
+    def authenticator(self) -> IMISAuthenticator:
+        """Return the shared password-grant authenticator for this tap."""
+        return IMISAuthenticator.create_for_stream(self)
 
-    def get_access_token(self):
-        if self.access_token is None:
-            self.access_token = self.get_new_access_token()
-        return self.access_token
-    
-    def get_jsonschema_type(self, property):
-        type_name = property["PropertyTypeName"]
+    def normalize_record(self, record: dict) -> dict:
+        """Apply this stream's record normalizer to a raw API row."""
+        return self.record_normalizer(record)
 
-        if type_name == "String":
-            return th.StringType()
-        if type_name == "Boolean":
-            return th.BooleanType()
-        if type_name == "Date":
-            return th.DateTimeType()
-        if type_name == "Integer":
-            return th.IntegerType()
-        if type_name == "EntityDefinitionData":
-            if property.get("ItemEntityPropertyDefinition"):
-                item_property = property.get("ItemEntityPropertyDefinition")
-                obj_props = [
-                    th.Property(item_property["Name"], self.get_jsonschema_type(item_property))
-                ]
-                return th.ObjectType(*obj_props)
+    def get_url_params(
+        self,
+        context: Optional[dict],
+        next_page_token: Optional[Any],
+    ) -> Dict[str, Any]:
+        """Add the page size, page offset, and incremental filter to the request."""
+        params: Dict[str, Any] = {"Limit": self.limit}
+        if next_page_token is not None:
+            params["Offset"] = next_page_token
+        params.update(
+            imis_replication_filter(
+                self.replication_key,
+                self._replication_start_iso(context),
+            )
+        )
+        return params
 
-            entity_properties = property.get("EntityDefinition").get("Properties").get("$values")
-            obj_props = []
-            for entity_property in entity_properties:
-                obj_props.append(th.Property(entity_property["Name"], self.get_jsonschema_type(entity_property)))
-            return th.ObjectType(*obj_props)
-        if type_name == "GenericPropertyDataCollection":
-            generic_properties = property.get("GenericPropertyDefinitions").get("$values")
-            obj_props = []
-            for generic_property in generic_properties:
-                obj_props.append(th.Property(generic_property["Name"], self.get_jsonschema_type(generic_property)))
-            return th.ObjectType(*obj_props)
-        else:
-            return th.StringType()
+    def _replication_start_iso(self, context: Optional[dict]) -> Optional[str]:
+        """Return the bookmark (or ``start_date``) as an ISO string for the incremental filter."""
+        if not self.replication_key:
+            return None
+        start_date = self.get_starting_time(context, is_inclusive=True)
+        if not start_date:
+            return None
+        return start_date.isoformat()
 
- 
-    def get_schema(self) -> dict:
-        url = f"{self.url_base}/metadata{self.path}"
-        headers = {"Authorization": f"Bearer {self.get_access_token()}"}
-        try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            schema = response.json().get("Properties").get("$values")
-            properties = []
-            for property in schema:
-                schema_type = self.get_jsonschema_type(property)
-                properties.append(th.Property(property["Name"], schema_type))
-            return th.PropertiesList(*properties).to_dict()
-        except requests.exceptions.HTTPError as e:
-            # Check if we got a 501 Not Implemented error
-            if e.response.status_code == 501:
-                self.logger.warning(f"Metadata endpoint returned 501 for {self.path}. Falling back to record inference.")
-                return self._infer_schema_from_records()
-            # Re-raise if it's a different error
-            raise
+    def get_next_page_token(
+        self,
+        response: requests.Response,
+        previous_token: Optional[Any],
+    ) -> Optional[Any]:
+        """Read the next list offset from an iMIS paginated response."""
+        return imis_next_page_token(response.json())
 
-    def _infer_schema_from_records(self) -> dict:
-        """Fetch sample records and infer schema from them."""
-        url = f"{self.url_base}{self.path}"
-        headers = {"Authorization": f"Bearer {self.get_access_token()}"}
-        
-        params = {"limit": 500}  
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        json_response = response.json()
-        items = json_response.get("Items", {})
-        
-        if isinstance(items, dict) and "$values" in items:
-            records = items.get("$values", [])
-        else:
-            records = items if isinstance(items, list) else []
-            
-        if not records:
-            self.logger.warning(f"No records found for {self.path}. Using empty schema.")
-            return {}
-        
-        properties = self.base_property_schema
-        new_properties = infer_schema_from_records(records)
-        properties.extend(new_properties)
-        return th.PropertiesList(*properties).to_dict()
-   
-    @cached_property
+    def parse_response(self, response: requests.Response) -> Iterable[dict]:
+        """Yield the records of one iMIS list page."""
+        yield from iter_imis_list_records(response.json())
+
+    def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
+        """Normalize each record before it is emitted to Singer."""
+        return self.normalize_record(row)
+
+    def _ensure_http_client(self) -> None:
+        """Create the HTTP session if the SDK hasn't yet.
+
+        The SDK reads ``schema`` inside ``Stream.__init__``, before ``RESTStream`` sets up
+        its session, and building the schema here makes API requests.
+        """
+        if not hasattr(self, "_http_headers"):
+            self._http_headers = {}
+        if not hasattr(self, "_requests_session"):
+            self._requests_session = requests.Session()
+
+    def _request_with_backoff(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        context: Optional[dict] = None,
+    ) -> requests.Response:
+        """Send a GET through the SDK so it gets auth headers, error handling, and retries."""
+        self._ensure_http_client()
+        decorated = self.request_decorator(self._request)
+        prepared = self.build_prepared_request(
+            method="GET",
+            url=url,
+            params=params or {},
+        )
+        return decorated(prepared, context)
+
+    def _fetch_sample_records(self) -> List[dict]:
+        """Fetch the first page of records to infer the schema from."""
+        url = f"{self.url_base.rstrip('/')}{self.path}"
+        response = self._request_with_backoff(url, params={"Limit": self.limit})
+        return list(iter_imis_list_records(response.json()))
+
+    @property
+    @cached
     def schema(self) -> dict:
-        return self.get_schema()
-
+        """Build the schema once per stream (see ``discover_stream_schema``)."""
+        return discover_stream_schema(self)
