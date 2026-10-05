@@ -1,22 +1,32 @@
-"""ActionKit tap class."""
+"""iMIS tap class."""
 
 from __future__ import annotations
+
 from typing import List
 
-from singer_sdk import Tap
-from singer_sdk import typing as th  # JSON schema typing helpers
+from hotglue_singer_sdk import Tap
+from hotglue_singer_sdk import typing as th
 
 from tap_imis.client import IMISStream
-from tap_imis.streams import ContactsStream, ActivitiesStream
+from tap_imis.streams import (
+    ActivitiesStream,
+    ContactsStream,
+    EventsStream,
+    GroupMembersStream,
+    GroupsStream,
+)
 
 STREAM_TYPES = [
     ContactsStream,
-    ActivitiesStream
+    ActivitiesStream,
+    EventsStream,
+    GroupsStream,
+    GroupMembersStream,
 ]
 
 
 class TapIMIS(Tap):
-    """IMIS tap class."""
+    """Singer tap for iMIS."""
 
     name = "tap-imis"
 
@@ -24,33 +34,31 @@ class TapIMIS(Tap):
         th.Property(
             "site_url",
             th.StringType,
-            required=False,
-            description="URL of the IMIS site",
+            required=True,
+            description="Base URL of the iMIS site (for example https://example.imiscloud.com)",
         ),
         th.Property(
             "username",
             th.StringType,
             required=True,
-            description="API username for authentication",
+            description="iMIS API username",
         ),
         th.Property(
             "password",
             th.StringType,
             required=True,
-            description="API password for authentication",
+            description="iMIS API password",
+        ),
+        th.Property(
+            "start_date",
+            th.DateTimeType,
+            description="Incremental streams only sync records on or after this date (ISO 8601)",
         ),
     ).to_dict()
 
     def discover_streams(self) -> List[IMISStream]:
-        """Return a list of discovered streams.
-
-        Returns:
-            A list of discovered streams.
-        """
+        """Return all supported iMIS entity streams."""
         return [stream_class(tap=self) for stream_class in STREAM_TYPES]
-    
-    def sync_all(self) -> None:
-        raise NotImplementedError("Sync all is not implemented")
 
 
 if __name__ == "__main__":
